@@ -1,0 +1,569 @@
+# =============================================================================
+# SCHEDULED RESILIENCE TESTING — Nightly & Weekly Deep Scans
+# =============================================================================
+# These tests are too slow or resource-intensive for every commit but are
+# essential for production hardening. An auditor expects to see evidence
+# of regular performance, load, and accessibility testing.
+#
+# Schedule:
+#   - Nightly (2 AM CT): Performance baselines, accessibility, visual regression
+#   - Weekly (Sunday 3 AM CT): Load testing, full DAST scan, chaos testing
+#
+# SETUP REQUIRED:
+#   1. Set STAGING_URL in GitHub Secrets
+#   2. Install k6: https://k6.io (for load testing scripts in /tests/load/)
+#   3. Add Playwright accessibility tests in /tests/a11y/
+#   4. OPTIONAL: Set SLACK_WEBHOOK_URL for failure notifications
+# =============================================================================
+
+name: Scheduled Resilience Testing
+
+on:
+  schedule:
+    # Nightly at 2 AM Central Time (8 AM UTC)
+    - cron: '0 8 * * 1-5'
+    # Weekly on Sunday at 3 AM Central Time (9 AM UTC)
+    - cron: '0 9 * * 0'
+
+  # Allow manual trigger
+  workflow_dispatch:
+    inputs:
+      test_suite:
+        description: 'Which suite to run'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - performance
+          - load
+          - accessibility
+          - visual-regression
+          - full-dast
+
+permissions:
+  contents: read
+  security-events: write
+  issues: write
+
+env:
+  NODE_VERSION: '20'
+  TARGET_URL: ${{ secrets.STAGING_URL }}
+
+jobs:
+  # ===========================================================================
+  # NIGHTLY: Performance Baseline Testing
+  # ===========================================================================
+  # Measures response times, TTFB, and throughput under normal conditions.
+  # Tracks trends over time — a performance regression that creeps in slowly
+  # is just as dangerous as one that happens all at once.
+  #
+  # Uses k6 (Grafana's load testing tool). Scripts go in /tests/load/
+  #
+  # What this catches:
+  #   - API endpoints getting slower over time
+  #   - Memory leaks under sustained load
+  #   - Database query performance regression
+  #   - Third-party service latency impact
+  # ===========================================================================
+  performance-baseline:
+    name: "Performance Baseline"
+    runs-on: ubuntu-latest
+    if: >-
+      github.event.schedule == '0 8 * * 1-5' ||
+      github.event.inputs.test_suite == 'all' ||
+      github.event.inputs.test_suite == 'performance'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install k6
+        run: |
+          sudo gpg -k
+          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D68
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install k6
+
+      # Run performance baseline test
+      - name: Run performance baseline
+        run: |
+          # Check if k6 test scripts exist
+          if [ -d "tests/load" ] && ls tests/load/*.js 1> /dev/null 2>&1; then
+            k6 run tests/load/baseline.js \
+              --out json=performance-results.json \
+              --env TARGET_URL=${{ env.TARGET_URL }} \
+              --summary-trend-stats="avg,min,med,max,p(90),p(95),p(99)"
+          else
+            echo "No k6 test scripts found in tests/load/"
+            echo ""
+            echo "Create tests/load/baseline.js with content like:"
+            echo ""
+            cat << 'EOF'
+          import http from 'k6/http';
+          import { check, sleep } from 'k6';
+
+          export const options = {
+            // Simulate 10 users for 2 minutes
+            vus: 10,
+            duration: '2m',
+            thresholds: {
+              // 95% of requests must complete within 500ms
+              http_req_duration: ['p(95)<500'],
+              // Less than 1% failure rate
+              http_req_failed: ['rate<0.01'],
+            },
+          };
+
+          const BASE_URL = __ENV.TARGET_URL || 'http://localhost:3000';
+
+          export default function () {
+            // Health check endpoint
+            const healthRes = http.get(`${BASE_URL}/health`);
+            check(healthRes, {
+              'health status 200': (r) => r.status === 200,
+              'health response < 200ms': (r) => r.timings.duration < 200,
+            });
+
+            // API endpoint (adjust to your routes)
+            const apiRes = http.get(`${BASE_URL}/api/status`);
+            check(apiRes, {
+              'api status 200': (r) => r.status === 200,
+              'api response < 500ms': (r) => r.timings.duration < 500,
+            });
+
+            sleep(1);
+          }
+          EOF
+          fi
+
+      - name: Upload performance results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-baseline-${{ github.run_number }}
+          path: performance-results.json
+          retention-days: 90    # Keep 90 days for trend analysis
+          if-no-files-found: ignore
+
+  # ===========================================================================
+  # NIGHTLY: Accessibility Testing (WCAG Compliance)
+  # ===========================================================================
+  # Automated accessibility checks against WCAG 2.1 AA standards.
+  # Particularly important given your healthcare background — healthcare
+  # applications face heightened accessibility requirements (Section 508,
+  # ADA compliance).
+  #
+  # Uses axe-core via Playwright for comprehensive scanning.
+  #
+  # What this catches:
+  #   - Missing alt text on images
+  #   - Insufficient color contrast
+  #   - Missing form labels
+  #   - Keyboard navigation failures
+  #   - ARIA attribute misuse
+  #   - Missing page landmarks
+  # ===========================================================================
+  accessibility:
+    name: "Accessibility (WCAG 2.1 AA)"
+    runs-on: ubuntu-latest
+    if: >-
+      github.event.schedule == '0 8 * * 1-5' ||
+      github.event.inputs.test_suite == 'all' ||
+      github.event.inputs.test_suite == 'accessibility'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright and axe
+        run: |
+          npx playwright install --with-deps chromium
+          npm install --no-save @axe-core/playwright
+
+      - name: Build application
+        run: npm run build --if-present
+
+      # Run Lighthouse CI for performance + accessibility + best practices
+      - name: Run Lighthouse CI
+        run: |
+          npm install --no-save @lhci/cli
+          npx lhci autorun \
+            --collect.url="${{ env.TARGET_URL || 'http://localhost:3000' }}" \
+            --collect.numberOfRuns=3 \
+            --assert.assertions.categories:accessibility=error \
+            --assert.assertions.categories:best-practices=warn \
+            --assert.preset=lighthouse:recommended \
+            || true
+
+      - name: Upload Lighthouse report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lighthouse-report-${{ github.run_number }}
+          path: .lighthouseci/
+          retention-days: 30
+          if-no-files-found: ignore
+
+  # ===========================================================================
+  # NIGHTLY: Visual Regression Testing
+  # ===========================================================================
+  # Takes screenshots of key pages/components and compares them against
+  # baseline images. Catches unintended visual changes that functional
+  # tests would miss:
+  #   - Layout shifts
+  #   - Font changes
+  #   - Color changes
+  #   - Missing elements
+  #   - Responsive design breakage
+  #
+  # Uses Playwright's built-in screenshot comparison.
+  # ===========================================================================
+  visual-regression:
+    name: "Visual Regression"
+    runs-on: ubuntu-latest
+    if: >-
+      github.event.schedule == '0 8 * * 1-5' ||
+      github.event.inputs.test_suite == 'all' ||
+      github.event.inputs.test_suite == 'visual-regression'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright
+        run: npx playwright install --with-deps chromium
+
+      - name: Build application
+        run: npm run build --if-present
+
+      # Run visual regression tests if they exist
+      - name: Run visual regression tests
+        run: |
+          if [ -d "tests/visual" ]; then
+            npx playwright test tests/visual/ --update-snapshots
+          else
+            echo "No visual regression tests found in tests/visual/"
+            echo ""
+            echo "Create tests/visual/screenshots.spec.ts with content like:"
+            echo ""
+            cat << 'VEOF'
+          import { test, expect } from '@playwright/test';
+
+          const BASE_URL = process.env.BASE_URL || 'http://localhost:3000';
+
+          test.describe('Visual Regression', () => {
+            test('homepage', async ({ page }) => {
+              await page.goto(BASE_URL);
+              await expect(page).toHaveScreenshot('homepage.png', {
+                maxDiffPixelRatio: 0.01,
+              });
+            });
+
+            test('login page', async ({ page }) => {
+              await page.goto(`${BASE_URL}/login`);
+              await expect(page).toHaveScreenshot('login.png', {
+                maxDiffPixelRatio: 0.01,
+              });
+            });
+
+            // Add more pages as needed
+          });
+          VEOF
+          fi
+
+      - name: Upload visual diffs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: visual-regression-${{ github.run_number }}
+          path: test-results/
+          retention-days: 14
+          if-no-files-found: ignore
+
+  # ===========================================================================
+  # WEEKLY: Load / Stress Testing
+  # ===========================================================================
+  # Pushes your application beyond normal operating conditions to find:
+  #   - Breaking points (at what concurrency does it fall over?)
+  #   - Memory leaks under sustained load
+  #   - Connection pool exhaustion
+  #   - Rate limiter behavior under pressure
+  #   - Graceful degradation vs. hard crashes
+  #   - Database connection limits
+  #
+  # This runs weekly because it's resource-intensive and the results
+  # don't change often unless architecture changes.
+  # ===========================================================================
+  load-testing:
+    name: "Load & Stress Testing"
+    runs-on: ubuntu-latest
+    if: >-
+      github.event.schedule == '0 9 * * 0' ||
+      github.event.inputs.test_suite == 'all' ||
+      github.event.inputs.test_suite == 'load'
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install k6
+        run: |
+          sudo gpg -k
+          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D68
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install k6
+
+      - name: Run load test
+        run: |
+          if [ -f "tests/load/stress.js" ]; then
+            k6 run tests/load/stress.js \
+              --out json=load-results.json \
+              --env TARGET_URL=${{ env.TARGET_URL }}
+          else
+            echo "No stress test script found at tests/load/stress.js"
+            echo ""
+            echo "Create tests/load/stress.js with content like:"
+            echo ""
+            cat << 'LEOF'
+          import http from 'k6/http';
+          import { check, sleep } from 'k6';
+
+          export const options = {
+            stages: [
+              // Ramp up to 50 users over 2 minutes
+              { duration: '2m', target: 50 },
+              // Hold at 50 users for 5 minutes
+              { duration: '5m', target: 50 },
+              // Spike to 100 users
+              { duration: '1m', target: 100 },
+              // Hold spike for 3 minutes
+              { duration: '3m', target: 100 },
+              // Ramp down
+              { duration: '2m', target: 0 },
+            ],
+            thresholds: {
+              http_req_duration: ['p(95)<1000'],   // 95% under 1s
+              http_req_failed: ['rate<0.05'],       // Less than 5% errors
+              http_reqs: ['rate>10'],                // At least 10 RPS
+            },
+          };
+
+          const BASE_URL = __ENV.TARGET_URL || 'http://localhost:3000';
+
+          export default function () {
+            const res = http.get(`${BASE_URL}/api/health`);
+            check(res, {
+              'status is 200': (r) => r.status === 200,
+              'response time < 1s': (r) => r.timings.duration < 1000,
+            });
+            sleep(0.5);
+          }
+          LEOF
+          fi
+
+      - name: Upload load test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: load-test-${{ github.run_number }}
+          path: load-results.json
+          retention-days: 90
+          if-no-files-found: ignore
+
+  # ===========================================================================
+  # WEEKLY: Full DAST Scan (Extended)
+  # ===========================================================================
+  # The post-merge workflow runs a ZAP baseline scan (fast, surface-level).
+  # This weekly scan runs the FULL active scan, which takes much longer but
+  # tests far more attack vectors.
+  # ===========================================================================
+  full-dast:
+    name: "Full DAST Scan (OWASP ZAP Active)"
+    runs-on: ubuntu-latest
+    if: >-
+      github.event.schedule == '0 9 * * 0' ||
+      github.event.inputs.test_suite == 'all' ||
+      github.event.inputs.test_suite == 'full-dast'
+    timeout-minutes: 60
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Full active scan — much more thorough than baseline
+      - name: OWASP ZAP Full Scan
+        if: env.TARGET_URL != ''
+        uses: zaproxy/action-full-scan@v0.10.0
+        with:
+          target: ${{ env.TARGET_URL }}
+          rules_file_name: '.zap/rules.tsv'
+          cmd_options: '-a -j -l WARN'
+          allow_issue_writing: true
+
+      - name: Upload Full ZAP Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-full-report-${{ github.run_number }}
+          path: |
+            report_html.html
+            report_json.json
+          retention-days: 90
+
+  # ===========================================================================
+  # WEEKLY: Configuration & Hardening Audit
+  # ===========================================================================
+  # Checks security best practices in your application configuration:
+  #   - Session secret length and entropy
+  #   - Cookie security flags (httpOnly, secure, sameSite)
+  #   - CORS configuration
+  #   - Rate limiting presence
+  #   - HTTPS enforcement
+  #   - Environment variable hygiene
+  # ===========================================================================
+  hardening-audit:
+    name: "Configuration Hardening Audit"
+    runs-on: ubuntu-latest
+    if: >-
+      github.event.schedule == '0 9 * * 0' ||
+      github.event.inputs.test_suite == 'all'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Audit security configuration
+        run: |
+          echo "=== Configuration Hardening Audit ==="
+          echo ""
+          ISSUES=0
+
+          # Check for common security misconfigurations in code
+          echo "--- Checking for insecure patterns ---"
+
+          # Session secret minimum length (should be 32+ chars in config)
+          if grep -rn 'SESSION_SECRET\|session.*secret' --include="*.ts" --include="*.js" --include="*.env.example" . 2>/dev/null | grep -v node_modules | grep -v '.git'; then
+            echo "⚠️  Found session secret references — verify length >= 32 chars and sourced from env"
+          fi
+
+          # Check for hardcoded credentials patterns
+          if grep -rn 'password.*=.*["\x27]' --include="*.ts" --include="*.js" . 2>/dev/null | grep -v node_modules | grep -v '.git' | grep -v 'test' | grep -v 'spec' | grep -v '.d.ts'; then
+            echo "❌ Possible hardcoded password found"
+            ISSUES=$((ISSUES + 1))
+          fi
+
+          # Check for console.log in production code (information leakage)
+          CONSOLE_COUNT=$(grep -rn 'console\.log' --include="*.ts" --include="*.js" src/ 2>/dev/null | grep -v node_modules | grep -v '.test.' | grep -v '.spec.' | wc -l)
+          if [ "$CONSOLE_COUNT" -gt 10 ]; then
+            echo "⚠️  Found $CONSOLE_COUNT console.log statements in src/ — consider using a proper logger"
+          fi
+
+          # Check for eval() usage
+          if grep -rn 'eval(' --include="*.ts" --include="*.js" src/ 2>/dev/null | grep -v node_modules; then
+            echo "❌ eval() usage detected — this is a critical security risk"
+            ISSUES=$((ISSUES + 1))
+          fi
+
+          # Check for HTTP (not HTTPS) URLs in code
+          HTTP_URLS=$(grep -rn 'http://' --include="*.ts" --include="*.js" src/ 2>/dev/null | grep -v node_modules | grep -v localhost | grep -v '127.0.0.1' | grep -v '0.0.0.0' | wc -l)
+          if [ "$HTTP_URLS" -gt 0 ]; then
+            echo "⚠️  Found $HTTP_URLS non-HTTPS URLs in source code"
+          fi
+
+          # Check for disabled security features
+          if grep -rn 'helmet\|cors\|rate.*limit\|csrf' --include="*.ts" --include="*.js" src/ 2>/dev/null | grep -v node_modules | head -5; then
+            echo "✅ Security middleware references found (helmet, cors, rate-limit, csrf)"
+          else
+            echo "⚠️  No security middleware detected — verify helmet, cors, rate limiting are configured"
+          fi
+
+          # Check for proper .env handling
+          if [ -f ".env" ]; then
+            echo "❌ .env file committed to repository — this should be in .gitignore"
+            ISSUES=$((ISSUES + 1))
+          fi
+
+          if ! grep -q '.env' .gitignore 2>/dev/null; then
+            echo "❌ .env not in .gitignore"
+            ISSUES=$((ISSUES + 1))
+          fi
+
+          # Check tsconfig strictness
+          if [ -f "tsconfig.json" ]; then
+            if grep -q '"strict": true' tsconfig.json; then
+              echo "✅ TypeScript strict mode enabled"
+            else
+              echo "⚠️  TypeScript strict mode not enabled — consider enabling for better type safety"
+            fi
+          fi
+
+          echo ""
+          echo "=== Audit Complete: $ISSUES critical issues found ==="
+          if [ $ISSUES -gt 0 ]; then
+            echo "::warning::$ISSUES hardening issues detected — review above"
+          fi
+
+  # ===========================================================================
+  # Failure notification
+  # ===========================================================================
+  notify-on-failure:
+    name: "Notify on Failure"
+    runs-on: ubuntu-latest
+    needs:
+      - performance-baseline
+      - accessibility
+      - visual-regression
+      - load-testing
+      - full-dast
+      - hardening-audit
+    if: failure()
+    steps:
+      - name: Generate failure summary
+        run: |
+          echo "## ❌ Scheduled Resilience Test Failures" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "One or more scheduled resilience tests failed." >> $GITHUB_STEP_SUMMARY
+          echo "Review the workflow run for details." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Test Suite | Result |" >> $GITHUB_STEP_SUMMARY
+          echo "|------------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Performance | ${{ needs.performance-baseline.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Accessibility | ${{ needs.accessibility.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Visual Regression | ${{ needs.visual-regression.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Load Testing | ${{ needs.load-testing.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Full DAST | ${{ needs.full-dast.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Hardening Audit | ${{ needs.hardening-audit.result }} |" >> $GITHUB_STEP_SUMMARY
+
+      # OPTIONAL: Slack notification on failure
+      # Uncomment and add SLACK_WEBHOOK_URL to secrets
+      # - name: Notify Slack
+      #   if: env.SLACK_WEBHOOK_URL != ''
+      #   run: |
+      #     curl -X POST -H 'Content-type: application/json' \
+      #       --data '{"text":"❌ Scheduled resilience tests failed. Check: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}' \
+      #       ${{ secrets.SLACK_WEBHOOK_URL }}

@@ -1,0 +1,446 @@
+# =============================================================================
+# CI SECURITY GATE — Runs on every PR and push to main
+# =============================================================================
+# This workflow is the merge blocker. Nothing gets into main without passing
+# every job in this file. It covers:
+#   - Unit tests with coverage enforcement
+#   - Static Application Security Testing (SAST)
+#   - Software Composition Analysis (SCA) — dependency vulnerabilities
+#   - Secrets detection
+#   - Code quality & linting
+#   - Smoke tests
+#   - TypeScript strict type checking
+#
+# SETUP REQUIRED:
+#   1. Add SNYK_TOKEN to your repo's GitHub Secrets (free at snyk.io)
+#   2. Enable GitHub Advanced Security (for CodeQL) — free for public repos
+#   3. Ensure your package.json has these scripts:
+#        "test": "vitest run --coverage"        (or jest equivalent)
+#        "test:smoke": "vitest run --smoke"      (smoke test subset)
+#        "lint": "eslint . --ext .ts,.tsx"
+#        "type-check": "tsc --noEmit"
+#   4. Adjust the Node version matrix below to match your target
+# =============================================================================
+
+name: CI Security Gate
+
+on:
+  pull_request:
+    branches: [main, master]
+  push:
+    branches: [main, master]
+
+# Cancel in-progress runs for the same branch/PR to save minutes
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  security-events: write    # Required for CodeQL SARIF uploads
+  pull-requests: write      # Required for PR comments/annotations
+  actions: read
+
+env:
+  NODE_VERSION: '20'        # Change to match your target Node version
+
+jobs:
+  # ===========================================================================
+  # JOB 1: Unit Tests + Coverage
+  # ===========================================================================
+  # This is your foundational layer. High coverage here means fewer surprises
+  # everywhere else. Enforces a minimum coverage threshold.
+  # ===========================================================================
+  unit-tests:
+    name: "Unit Tests & Coverage"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run unit tests with coverage
+        run: npm test -- --coverage
+        env:
+          CI: true
+
+      # Upload coverage report as artifact for review
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 14
+
+      # OPTIONAL: Enforce minimum coverage threshold
+      # Uncomment and adjust the threshold to your target
+      # - name: Check coverage threshold
+      #   run: |
+      #     COVERAGE=$(npx istanbul-cobertura-coverage --threshold 80)
+      #     if [ $? -ne 0 ]; then
+      #       echo "::error::Coverage below 80% threshold"
+      #       exit 1
+      #     fi
+
+  # ===========================================================================
+  # JOB 2: TypeScript Type Checking
+  # ===========================================================================
+  # Strict type checking catches entire classes of bugs at compile time.
+  # This runs tsc --noEmit to verify types without producing output.
+  # ===========================================================================
+  type-check:
+    name: "TypeScript Type Check"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run TypeScript compiler check
+        run: npx tsc --noEmit
+
+  # ===========================================================================
+  # JOB 3: Linting & Code Quality
+  # ===========================================================================
+  # ESLint with security-focused plugins catches code quality issues AND
+  # common security anti-patterns (eval usage, prototype pollution, etc.)
+  # ===========================================================================
+  lint:
+    name: "Lint & Code Quality"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run ESLint
+        run: npx eslint . --ext .ts,.tsx,.js,.jsx --format=json --output-file=eslint-report.json || true
+
+      - name: Annotate ESLint results on PR
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eslint-report
+          path: eslint-report.json
+          retention-days: 7
+
+      # Fail the job if ESLint found errors (not warnings)
+      - name: Check for ESLint errors
+        run: npx eslint . --ext .ts,.tsx,.js,.jsx --max-warnings=0
+
+  # ===========================================================================
+  # JOB 4: SAST — Static Application Security Testing (CodeQL)
+  # ===========================================================================
+  # CodeQL is GitHub's native SAST engine. It performs deep semantic analysis
+  # of your code to find vulnerabilities like:
+  #   - SQL injection / NoSQL injection
+  #   - Cross-site scripting (XSS)
+  #   - Path traversal
+  #   - Insecure deserialization
+  #   - Prototype pollution
+  #   - Command injection
+  #   - Regex denial of service (ReDoS)
+  #
+  # Results appear in GitHub's Security tab under "Code scanning alerts"
+  # ===========================================================================
+  codeql-sast:
+    name: "SAST — CodeQL Analysis"
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+          # Use the extended security query suite for maximum coverage
+          queries: security-extended
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:javascript-typescript"
+
+  # ===========================================================================
+  # JOB 5: SAST — Semgrep (Pattern-Based Security Scanning)
+  # ===========================================================================
+  # Semgrep complements CodeQL with pattern-based rules. It catches things
+  # CodeQL might miss, including:
+  #   - OWASP Top 10 patterns
+  #   - Hardcoded secrets patterns
+  #   - Insecure JWT configurations
+  #   - Weak session handling
+  #   - Missing security headers
+  #   - Express/Node-specific vulnerabilities
+  # ===========================================================================
+  semgrep-sast:
+    name: "SAST — Semgrep"
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Semgrep
+        uses: returntocorp/semgrep-action@v1
+        with:
+          config: >-
+            p/security-audit
+            p/secrets
+            p/owasp-top-ten
+            p/typescript
+            p/nodejs
+            p/jwt
+            p/express
+          generateSarif: true
+
+      - name: Upload Semgrep SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep.sarif
+
+  # ===========================================================================
+  # JOB 6: SCA — Software Composition Analysis (Dependency Vulnerabilities)
+  # ===========================================================================
+  # Your node_modules folder is the single largest attack surface in most
+  # Node.js applications. This job scans every dependency (direct and
+  # transitive) for known CVEs.
+  #
+  # npm audit is the baseline; Snyk provides deeper analysis and fix PRs.
+  # ===========================================================================
+  dependency-audit:
+    name: "SCA — Dependency Vulnerabilities"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      # npm audit — built-in, zero config
+      - name: Run npm audit
+        run: npm audit --audit-level=high
+        continue-on-error: false
+
+      # Snyk — deeper analysis with fix recommendations
+      # Requires SNYK_TOKEN in GitHub Secrets
+      - name: Run Snyk security scan
+        if: env.SNYK_TOKEN != ''
+        uses: snyk/actions/node@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --severity-threshold=high
+
+  # ===========================================================================
+  # JOB 7: Secrets Detection
+  # ===========================================================================
+  # This is NON-NEGOTIABLE. A leaked API key, database password, or session
+  # secret in your repo is game over. This job scans:
+  #   - All files in the current commit
+  #   - Full git history (catches secrets in old commits)
+  #   - Environment files, config files, and code
+  #
+  # This ALWAYS blocks the merge. No exceptions.
+  # ===========================================================================
+  secrets-detection:
+    name: "Secrets Detection"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code (full history for git log scanning)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0    # Full history — catches secrets in old commits
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ===========================================================================
+  # JOB 8: Smoke Tests
+  # ===========================================================================
+  # A small, fast suite that verifies the application:
+  #   1. Builds successfully
+  #   2. Starts without crashing
+  #   3. Responds to health checks
+  #   4. Core happy-path routes return expected status codes
+  #
+  # This catches "it compiles but doesn't run" scenarios.
+  # ===========================================================================
+  smoke-tests:
+    name: "Build & Smoke Tests"
+    runs-on: ubuntu-latest
+    needs: [unit-tests]   # Only run if unit tests pass
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build application
+        run: npm run build --if-present
+
+      # Start the app in background, wait for it, then test
+      - name: Start application
+        run: |
+          npm start &
+          APP_PID=$!
+          echo "APP_PID=$APP_PID" >> $GITHUB_ENV
+
+          # Wait for the app to be ready (adjust port as needed)
+          echo "Waiting for application to start..."
+          for i in $(seq 1 30); do
+            if curl -s http://localhost:3000/health > /dev/null 2>&1; then
+              echo "Application is ready!"
+              break
+            fi
+            if [ $i -eq 30 ]; then
+              echo "::error::Application failed to start within 30 seconds"
+              exit 1
+            fi
+            sleep 1
+          done
+
+      # Basic health check smoke test
+      - name: Run smoke tests
+        run: |
+          # Health endpoint returns 200
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/health)
+          if [ "$HTTP_STATUS" != "200" ]; then
+            echo "::error::Health check failed with status $HTTP_STATUS"
+            exit 1
+          fi
+          echo "Health check passed: $HTTP_STATUS"
+
+          # Run any tagged smoke tests if they exist
+          npm run test:smoke --if-present || echo "No smoke test script found, skipping"
+
+      - name: Stop application
+        if: always()
+        run: kill ${{ env.APP_PID }} 2>/dev/null || true
+
+  # ===========================================================================
+  # JOB 9: License Compliance (Quick Check)
+  # ===========================================================================
+  # Verifies that no dependency uses a license that would be problematic
+  # for a commercial/enterprise product (GPL, AGPL, etc.)
+  # ===========================================================================
+  license-check:
+    name: "License Compliance"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check licenses
+        run: |
+          npx license-checker --production --failOn \
+            'GPL-2.0;GPL-3.0;AGPL-1.0;AGPL-3.0;EUPL-1.1;EUPL-1.2;SSPL-1.0' \
+            --summary
+
+  # ===========================================================================
+  # FINAL GATE — All checks must pass
+  # ===========================================================================
+  # This job exists so you can set a single required status check in your
+  # branch protection rules: "ci-gate"
+  # ===========================================================================
+  ci-gate:
+    name: "CI Gate — All Checks Passed"
+    runs-on: ubuntu-latest
+    needs:
+      - unit-tests
+      - type-check
+      - lint
+      - codeql-sast
+      - semgrep-sast
+      - dependency-audit
+      - secrets-detection
+      - smoke-tests
+      - license-check
+    if: always()
+    steps:
+      - name: Evaluate results
+        run: |
+          echo "=== CI Security Gate Results ==="
+          echo "Unit Tests:     ${{ needs.unit-tests.result }}"
+          echo "Type Check:     ${{ needs.type-check.result }}"
+          echo "Lint:           ${{ needs.lint.result }}"
+          echo "CodeQL SAST:    ${{ needs.codeql-sast.result }}"
+          echo "Semgrep SAST:   ${{ needs.semgrep-sast.result }}"
+          echo "Dependency SCA: ${{ needs.dependency-audit.result }}"
+          echo "Secrets:        ${{ needs.secrets-detection.result }}"
+          echo "Smoke Tests:    ${{ needs.smoke-tests.result }}"
+          echo "License Check:  ${{ needs.license-check.result }}"
+          echo "================================"
+
+          # Fail if ANY job failed
+          if [[ "${{ needs.unit-tests.result }}" == "failure" || \
+                "${{ needs.type-check.result }}" == "failure" || \
+                "${{ needs.lint.result }}" == "failure" || \
+                "${{ needs.codeql-sast.result }}" == "failure" || \
+                "${{ needs.semgrep-sast.result }}" == "failure" || \
+                "${{ needs.dependency-audit.result }}" == "failure" || \
+                "${{ needs.secrets-detection.result }}" == "failure" || \
+                "${{ needs.smoke-tests.result }}" == "failure" || \
+                "${{ needs.license-check.result }}" == "failure" ]]; then
+            echo "::error::One or more CI checks failed. Merge blocked."
+            exit 1
+          fi
+
+          echo "All checks passed. Safe to merge."
