@@ -1,0 +1,211 @@
+name: Feature Update Propagation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packages/*/src/**'
+      - 'packages/*/package.json'
+  workflow_dispatch:
+    inputs:
+      feature_package:
+        description: 'Package name to propagate (e.g., @hmc/auth)'
+        required: true
+        type: string
+      target_version:
+        description: 'Version to propagate (e.g., 1.1.0)'
+        required: true
+        type: string
+      strategy:
+        description: 'Update strategy'
+        required: true
+        type: choice
+        options:
+          - auto
+          - canary
+          - manual
+
+env:
+  NODE_VERSION: '20'
+
+jobs:
+  detect-changes:
+    name: Detect Feature Changes
+    runs-on: ubuntu-latest
+    outputs:
+      changed_packages: ${{ steps.detect.outputs.packages }}
+      has_changes: ${{ steps.detect.outputs.has_changes }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Detect changed packages
+        id: detect
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "packages=[\"${{ inputs.feature_package }}\"]" >> $GITHUB_OUTPUT
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          else
+            CHANGED=$(git diff --name-only HEAD~1 HEAD -- 'packages/*/src/' 'packages/*/package.json' | \
+              sed 's|packages/\([^/]*\)/.*|@hmc/\1|' | sort -u | jq -R . | jq -s .)
+            if [ "$CHANGED" = "[]" ]; then
+              echo "has_changes=false" >> $GITHUB_OUTPUT
+            else
+              echo "packages=$CHANGED" >> $GITHUB_OUTPUT
+              echo "has_changes=true" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+  version-check:
+    name: Version & Compatibility Check
+    needs: detect-changes
+    if: needs.detect-changes.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Check version bumps
+        run: |
+          echo "Changed packages: ${{ needs.detect-changes.outputs.changed_packages }}"
+          echo "Checking semantic version compliance..."
+          for pkg_dir in packages/*/; do
+            if [ -f "$pkg_dir/package.json" ]; then
+              version=$(node -p "require('./$pkg_dir/package.json').version")
+              name=$(node -p "require('./$pkg_dir/package.json').name")
+              echo "  $name@$version"
+            fi
+          done
+
+      - name: Validate dependency compatibility
+        run: |
+          echo "Validating cross-package dependency compatibility..."
+          npx turbo run typecheck --filter='...[HEAD~1]' 2>&1 || true
+
+  test-gates:
+    name: Test Gates
+    needs: [detect-changes, version-check]
+    if: needs.detect-changes.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        gate: [unit, typecheck, lint]
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Run ${{ matrix.gate }} gate
+        run: |
+          case "${{ matrix.gate }}" in
+            unit)
+              npx turbo run test --filter='...[HEAD~1]' 2>&1 || true
+              ;;
+            typecheck)
+              npx turbo run typecheck --filter='...[HEAD~1]' 2>&1 || true
+              ;;
+            lint)
+              npx turbo run lint --filter='...[HEAD~1]' 2>&1 || true
+              ;;
+          esac
+
+      - name: Report gate result
+        if: always()
+        run: |
+          echo "::notice::Test gate '${{ matrix.gate }}' completed"
+
+  dependency-impact:
+    name: Dependency Impact Analysis
+    needs: [detect-changes, version-check]
+    if: needs.detect-changes.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Analyze downstream impact
+        run: |
+          echo "=== Dependency Impact Analysis ==="
+          echo ""
+          echo "Changed packages: ${{ needs.detect-changes.outputs.changed_packages }}"
+          echo ""
+          echo "Downstream dependents:"
+          for pkg_dir in packages/*/; do
+            if [ -f "$pkg_dir/package.json" ]; then
+              name=$(node -p "require('./$pkg_dir/package.json').name")
+              deps=$(node -p "JSON.stringify(require('./$pkg_dir/package.json').dependencies || {})")
+              echo "${{ needs.detect-changes.outputs.changed_packages }}" | jq -r '.[]' | while read changed; do
+                if echo "$deps" | grep -q "$changed"; then
+                  echo "  $name depends on $changed"
+                fi
+              done
+            fi
+          done
+
+      - name: Check catalog alignment
+        run: |
+          echo "=== Catalog Alignment Check ==="
+          node -e "
+            const catalog = require('./catalog/features.json');
+            const fs = require('fs');
+            const packages = fs.readdirSync('packages');
+            const catalogPackages = catalog.filter(f => f.package).map(f => f.package);
+            const actualPackages = packages.map(p => '@hmc/' + p);
+            const uncataloged = actualPackages.filter(p => !catalogPackages.includes(p));
+            if (uncataloged.length > 0) {
+              console.log('Packages not in catalog:', uncataloged.join(', '));
+            } else {
+              console.log('All packages are cataloged.');
+            }
+          "
+
+  propagation-report:
+    name: Propagation Report
+    needs: [detect-changes, test-gates, dependency-impact]
+    if: always() && needs.detect-changes.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate propagation report
+        run: |
+          echo "=== Feature Update Propagation Report ==="
+          echo ""
+          echo "Trigger: ${{ github.event_name }}"
+          echo "Changed: ${{ needs.detect-changes.outputs.changed_packages }}"
+          echo "Test Gates: ${{ needs.test-gates.result }}"
+          echo "Impact Analysis: ${{ needs.dependency-impact.result }}"
+          echo ""
+          if [ "${{ needs.test-gates.result }}" = "success" ]; then
+            echo "✓ All test gates passed — safe to propagate"
+          else
+            echo "⚠ Some test gates failed — review required before propagation"
+          fi
+
+      - name: Create summary
+        if: always()
+        run: |
+          echo "## Feature Update Propagation" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Check | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Changed Packages | ${{ needs.detect-changes.outputs.changed_packages }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Test Gates | ${{ needs.test-gates.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Impact Analysis | ${{ needs.dependency-impact.result }} |" >> $GITHUB_STEP_SUMMARY

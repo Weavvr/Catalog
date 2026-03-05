@@ -82,3 +82,110 @@ export interface CatalogStats {
   byComplexity: Record<string, number>;
   byCategory: Record<string, number>;
 }
+
+// ── Feature Registry Types ──────────────────────────────────────
+
+export interface RegistryFeature extends Feature {
+  version: string;
+  updatePolicy: 'auto' | 'manual' | 'canary' | 'scheduled';
+  maintainers: string[];
+  versions: FeatureVersionEntry[];
+  compatibilityRules: CompatibilityRuleEntry[];
+}
+
+export interface FeatureVersionEntry {
+  version: string;
+  releasedAt: string;
+  changelog: string;
+  breakingChanges: string[];
+}
+
+export interface CompatibilityRuleEntry {
+  featureId: string;
+  type: 'requires' | 'conflicts' | 'recommends';
+  reason: string;
+}
+
+// ── Registered App ──────────────────────────────────────────────
+
+export interface RegisteredAppEntry {
+  id: string;
+  name: string;
+  displayName: string;
+  repoUrl: string;
+  features: AppFeatureBindingEntry[];
+  updatePolicy: 'auto' | 'manual' | 'canary' | 'scheduled';
+  status: 'active' | 'migrating' | 'deprecated';
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AppFeatureBindingEntry {
+  featureId: string;
+  pinnedVersion: string;
+  installedAt: string;
+  lastUpdated: string;
+  updatePolicy: 'auto' | 'manual' | 'canary' | 'scheduled';
+}
+
+// ── Migration Types ─────────────────────────────────────────────
+
+export interface MigrationInventoryEntry {
+  appId: string;
+  appName: string;
+  repoUrl: string;
+  migrationPolicy: 'full' | 'forward-only' | 'exception';
+  complexity: 'low' | 'medium' | 'high' | 'extreme';
+  priority: number;
+  features: MigrationFeatureEntry[];
+}
+
+export interface MigrationFeatureEntry {
+  sourceIdentifier: string;
+  masterFeatureId: string | null;
+  readiness: 'ready' | 'needs-adapter' | 'needs-refactor' | 'not-feasible' | 'exception';
+  status: string;
+  estimatedEffort: string;
+}
+
+// ── Pipeline Types ──────────────────────────────────────────────
+
+export interface PipelineRunEntry {
+  id: string;
+  featureId: string;
+  fromVersion: string;
+  toVersion: string;
+  status: string;
+  targetApps: number;
+  startedAt: string;
+  completedAt?: string;
+}
+
+// ── Admin Dashboard ─────────────────────────────────────────────
+
+export interface AdminDashboardData {
+  registry: {
+    totalFeatures: number;
+    extractedFeatures: number;
+    totalApps: number;
+    totalVersions: number;
+  };
+  migration: {
+    totalApps: number;
+    fullyMigrated: number;
+    migrating: number;
+    exceptions: number;
+  };
+  pipeline: {
+    totalRuns: number;
+    active: number;
+    completed: number;
+    failed: number;
+  };
+  requests: {
+    pending: number;
+    inReview: number;
+    delivered: number;
+    enhancements: number;
+  };
+}

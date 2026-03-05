@@ -26,7 +26,7 @@
         "tags",
         "category"
       ],
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "id": {
           "type": "string",
@@ -110,6 +110,73 @@
           "type": "string",
           "description": "Display category grouping.",
           "enum": ["Foundation", "Shared Features", "Domain Features", "Enterprise & Compliance"]
+        },
+        "version": {
+          "type": "string",
+          "description": "Current semantic version (e.g., 1.0.0).",
+          "pattern": "^\\d+\\.\\d+\\.\\d+",
+          "default": "1.0.0"
+        },
+        "updatePolicy": {
+          "type": "string",
+          "description": "How updates propagate to downstream apps.",
+          "enum": ["auto", "manual", "canary", "scheduled"],
+          "default": "auto"
+        },
+        "maintainers": {
+          "type": "array",
+          "description": "List of maintainer identifiers for this feature.",
+          "items": { "type": "string" }
+        },
+        "changelog": {
+          "type": "array",
+          "description": "Version history with release notes.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "version": { "type": "string" },
+              "date": { "type": "string" },
+              "changes": { "type": "string" }
+            }
+          }
+        },
+        "contract": {
+          "type": "object",
+          "description": "Integration contract defining the public API surface.",
+          "properties": {
+            "exports": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": { "type": "string" },
+                  "type": { "type": "string" },
+                  "description": { "type": "string" }
+                }
+              }
+            },
+            "events": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": { "type": "string" },
+                  "description": { "type": "string" }
+                }
+              }
+            },
+            "routes": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "method": { "type": "string" },
+                  "path": { "type": "string" },
+                  "description": { "type": "string" }
+                }
+              }
+            }
+          }
         }
       }
     }

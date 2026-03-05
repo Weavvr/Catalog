@@ -1,0 +1,26 @@
+{
+  "name": "@hmc/update-pipeline",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Automated feature update pipeline with publish, test, canary, rollback, and notification mechanisms",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@hmc/feature-registry": "*",
+    "@hmc/types": "*",
+    "@hmc/logger": "*"
+  }
+}

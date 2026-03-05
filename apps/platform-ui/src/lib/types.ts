@@ -105,3 +105,126 @@ export const REQUEST_STATUS_STYLES: Record<string, string> = {
   complete: 'bg-green-100 text-green-800',
   failed: 'bg-red-100 text-red-800',
 };
+
+// ── Feature Registry Types ──────────────────────────────────────
+
+export interface RegistryFeature extends Feature {
+  version: string;
+  updatePolicy: 'auto' | 'manual' | 'canary' | 'scheduled';
+  maintainers: string[];
+  versions: FeatureVersionEntry[];
+  compatibilityRules: CompatibilityRuleEntry[];
+}
+
+export interface FeatureVersionEntry {
+  version: string;
+  releasedAt: string;
+  changelog: string;
+  breakingChanges: string[];
+}
+
+export interface CompatibilityRuleEntry {
+  featureId: string;
+  type: 'requires' | 'conflicts' | 'recommends';
+  reason: string;
+}
+
+export interface ValidationResult {
+  valid: boolean;
+  errors: string[];
+  warnings: string[];
+  missingDeps: string[];
+}
+
+// ── Migration Types ─────────────────────────────────────────────
+
+export interface MigrationInventory {
+  appId: string;
+  appName: string;
+  repoUrl: string;
+  migrationPolicy: 'full' | 'forward-only' | 'exception';
+  complexity: 'low' | 'medium' | 'high' | 'extreme';
+  priority: number;
+  features: MigrationFeature[];
+}
+
+export interface MigrationFeature {
+  sourceIdentifier: string;
+  masterFeatureId: string | null;
+  readiness: 'ready' | 'needs-adapter' | 'needs-refactor' | 'not-feasible' | 'exception';
+  status: string;
+  estimatedEffort: string;
+}
+
+export interface MigrationMetrics {
+  totalApps: number;
+  fullyMigrated: number;
+  migrating: number;
+  exceptions: number;
+  totalMappings: number;
+  featuresMigrated: number;
+  duplicatedCodeReduction: number;
+}
+
+// ── Pipeline Types ──────────────────────────────────────────────
+
+export interface PipelineRun {
+  id: string;
+  featureId: string;
+  fromVersion: string;
+  toVersion: string;
+  status: string;
+  targetApps: number;
+  startedAt: string;
+  completedAt?: string;
+}
+
+// ── Admin Dashboard ─────────────────────────────────────────────
+
+export interface AdminDashboard {
+  registry: {
+    totalFeatures: number;
+    extractedFeatures: number;
+    totalApps: number;
+    totalVersions: number;
+  };
+  migration: MigrationMetrics;
+  pipeline: {
+    totalRuns: number;
+    active: number;
+    completed: number;
+    failed: number;
+  };
+  requests: {
+    pending: number;
+    inReview: number;
+    delivered: number;
+    enhancements: number;
+  };
+}
+
+// ── Style Maps ──────────────────────────────────────────────────
+
+export const READINESS_COLORS: Record<string, string> = {
+  ready: 'bg-green-100 text-green-800',
+  'needs-adapter': 'bg-yellow-100 text-yellow-800',
+  'needs-refactor': 'bg-orange-100 text-orange-800',
+  'not-feasible': 'bg-red-100 text-red-800',
+  exception: 'bg-gray-100 text-gray-800',
+};
+
+export const POLICY_COLORS: Record<string, string> = {
+  auto: 'bg-green-100 text-green-800',
+  manual: 'bg-blue-100 text-blue-800',
+  canary: 'bg-yellow-100 text-yellow-800',
+  scheduled: 'bg-purple-100 text-purple-800',
+};
+
+export const PIPELINE_STATUS_COLORS: Record<string, string> = {
+  pending: 'bg-gray-100 text-gray-800',
+  running: 'bg-blue-100 text-blue-800',
+  testing: 'bg-yellow-100 text-yellow-800',
+  completed: 'bg-green-100 text-green-800',
+  failed: 'bg-red-100 text-red-800',
+  'rolled-back': 'bg-orange-100 text-orange-800',
+};

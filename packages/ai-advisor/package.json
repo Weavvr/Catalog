@@ -1,0 +1,26 @@
+{
+  "name": "@hmc/ai-advisor",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "AI-assisted feature selection, validation, and recommendation engine powered by Claude",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@hmc/feature-registry": "*",
+    "@hmc/types": "*",
+    "@hmc/logger": "*"
+  }
+}

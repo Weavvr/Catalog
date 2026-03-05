@@ -6,6 +6,9 @@ import catalogRouter from './routes/catalog.js';
 import generatorRouter from './routes/generator.js';
 import nlpRouter from './routes/nlp.js';
 import requestsRouter from './routes/requests.js';
+import registryRouter from './routes/registry.js';
+import migrationRouter from './routes/migration.js';
+import pipelineRouter from './routes/pipeline.js';
 
 const app = express();
 const PORT = process.env.PORT || 3456;
@@ -31,6 +34,9 @@ app.use('/api/catalog', catalogRouter);
 app.use('/api/generate', generatorRouter);
 app.use('/api/nlp', nlpRouter);
 app.use('/api/requests', requestsRouter);
+app.use('/api/registry', registryRouter);
+app.use('/api/migration', migrationRouter);
+app.use('/api/pipeline', pipelineRouter);
 
 // Serve static files in production
 // Works both when running from source (tsx) and compiled (node dist/server/)
