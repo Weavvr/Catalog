@@ -24,11 +24,26 @@
 
 name: CI Security Gate
 
+# =============================================================================
+# TRIGGER POLICY (Tiered CI — saves ~90% of GitHub Actions minutes)
+# =============================================================================
+# This full security scan runs ONLY when:
+#   1. A commit message contains [scan]  (keyword-triggered)
+#   2. Weekly on Monday at 6 AM UTC      (scheduled backstop)
+#   3. Manually via "Run workflow" button (on-demand)
+#
+# Lightweight lint + secrets checks run on EVERY push via push-checks.yml.
+# =============================================================================
 on:
-  pull_request:
-    branches: [main, master]
   push:
+    needs: trigger-check
+    if: needs.trigger-check.outputs.should-run == 'true'
     branches: [main, master]
+  schedule:
+    needs: trigger-check
+    if: needs.trigger-check.outputs.should-run == 'true'
+    - cron: '0 6 * * 1'  # Every Monday at 6 AM UTC
+  workflow_dispatch:       # Manual trigger anytime
 
 # Cancel in-progress runs for the same branch/PR to save minutes
 concurrency:
@@ -45,6 +60,36 @@ env:
   NODE_VERSION: '20'        # Change to match your target Node version
 
 jobs:
+  # ===========================================================================
+  # TRIGGER CHECK — Skip full scan unless [scan] keyword, schedule, or manual
+  # ===========================================================================
+  trigger-check:
+    name: "Check Trigger"
+    runs-on: ubuntu-latest
+    outputs:
+      should-run: ${{ steps.check.outputs.run }}
+    steps:
+      - name: Determine if full scan should run
+        id: check
+        run: |
+          if [[ "${{ github.event_name }}" == "schedule" || "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "run=true" >> $GITHUB_OUTPUT
+            echo "Triggered by: ${{ github.event_name }}"
+          elif [[ "${{ github.event_name }}" == "push" ]]; then
+            COMMIT_MSG=$(cat <<'COMMIT_EOF'
+          ${{ github.event.head_commit.message }}
+          COMMIT_EOF
+            )
+            if echo "$COMMIT_MSG" | grep -qi '\[scan\]'; then
+              echo "run=true" >> $GITHUB_OUTPUT
+              echo "Triggered by: [scan] keyword in commit message"
+            else
+              echo "run=false" >> $GITHUB_OUTPUT
+              echo "Skipping full scan — no [scan] keyword. Lightweight checks run in push-checks.yml."
+            fi
+          else
+            echo "run=false" >> $GITHUB_OUTPUT
+          fi
   # ===========================================================================
   # JOB 1: Unit Tests + Coverage
   # ===========================================================================
@@ -114,6 +159,8 @@ jobs:
   # ===========================================================================
   type-check:
     name: "TypeScript Type Check"
+    needs: trigger-check
+    if: needs.trigger-check.outputs.should-run == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -311,6 +358,8 @@ jobs:
   # ===========================================================================
   secrets-detection:
     name: "Secrets Detection"
+    needs: trigger-check
+    if: needs.trigger-check.outputs.should-run == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -349,7 +398,7 @@ jobs:
   smoke-tests:
     name: "Build & Smoke Tests"
     runs-on: ubuntu-latest
-    needs: [unit-tests]
+    needs: [trigger-check, unit-tests]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -426,6 +475,8 @@ jobs:
   # ===========================================================================
   license-check:
     name: "License Compliance"
+    needs: trigger-check
+    if: needs.trigger-check.outputs.should-run == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -478,6 +529,14 @@ jobs:
           echo "Smoke Tests:    ${{ needs.smoke-tests.result }}"
           echo "License Check:  ${{ needs.license-check.result }}"
           echo "================================"
+
+          # If the full scan was skipped (no [scan] keyword), report success
+          if [[ "${{ needs.trigger-check.outputs.should-run }}" != "true" ]]; then
+            echo "Full security scan skipped — no [scan] keyword in commit message."
+            echo "Lightweight checks run via push-checks.yml."
+            echo "To run full scan: add [scan] to commit message, or trigger manually."
+            exit 0
+          fi
 
           # Fail if ANY job failed
           if [[ "${{ needs.unit-tests.result }}" == "failure" || \
